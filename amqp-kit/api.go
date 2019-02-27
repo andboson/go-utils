@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"sync"
 
 	"github.com/go-kit/kit/endpoint"
 	"github.com/streadway/amqp"
@@ -42,26 +43,21 @@ type subscriber struct {
 }
 
 type Server struct {
-	Conn *amqp.Connection
-	ch   *amqp.Channel
-	subs []SubscribeInfo
+	conn           *amqp.Connection
+	connectionLock sync.RWMutex
+	subs           []SubscribeInfo
+	config         *Config
 }
 
-func NewServer(s []SubscribeInfo, con *amqp.Connection) *Server {
+func NewServer(s []SubscribeInfo, cfg *Config) *Server {
 	return &Server{
-		Conn: con,
-		subs: s,
+		subs:   s,
+		config: cfg,
 	}
 }
 
 func (s *Server) Serve() (err error) {
-
-	if s.ch, err = s.Conn.Channel(); err != nil {
-		return
-	}
-
 	subscribers := make(map[string]*subscriber)
-
 	for _, si := range s.subs {
 		q := si.QueueName()
 
@@ -78,13 +74,17 @@ func (s *Server) Serve() (err error) {
 			ex:  si.Exchange,
 			key: si.Key,
 			num: workers,
-			h:   NewSubscriber(si.E, si.Dec, si.Enc, si.O...).ServeDelivery(s.ch),
+			h:   NewSubscriber(si.E, si.Dec, si.Enc, si.O...).ServeDelivery(ch),
 		}
 	}
 
 	for queue, sub := range subscribers {
+		ch, err := s.conn.Channel()
+		if err != nil {
+			return
+		}
 
-		msgs, err := s.ch.Consume(queue, "", false, false, false, false, nil)
+		msgs, err := ch.Consume(queue, "", false, false, false, false, nil)
 		if err != nil {
 			return err
 		}
@@ -154,7 +154,7 @@ func (s *Server) reconnect(count int, exchange, queue string, keys ...string) (c
 		0,     // prefetch size
 		false, // global
 	); err != nil {
-		return err
+		return
 	}
 
 	for _, key := range keys {
